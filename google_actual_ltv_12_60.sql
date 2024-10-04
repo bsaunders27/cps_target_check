@@ -1,5 +1,5 @@
 DROP TABLE IF EXISTS #increments;
-SELECT TOP 60
+SELECT TOP 60 --Why are we selecting 60 increments?
        ROW_NUMBER () OVER () AS increments_from_signup
 INTO #increments
 FROM analytics.driver_summary
@@ -12,7 +12,7 @@ DROP TABLE IF EXISTS #attribution_v3_signups;
 SELECT driver_id,
        signup_date,
        signup_month,
-       channel_lvl_5 as channels,
+       channel_lvl_5 as channels, --In future, should rename as "channel"
        paid_halo,
        2 as pick_rank
 INTO #attribution_v3_signups
@@ -94,6 +94,7 @@ DROP TABLE IF EXISTS #cohort_detail;
 SELECT s.channels
      , s.signup_month
      --, DATEDIFF(month, s.signup_month, DATE_TRUNC('month', d.date)) + 1                                                  AS increments_from_signup
+     --Is the datediff 30 consistent with what Jodie uses? We have 30 days for actuals, and 28 days for predictions?
      , FLOOR(DATEDIFF(day, s.signup_date, d.date::date)/30) + 1                                                          AS increments_from_signup
      , SUM(CASE WHEN rs.is_ever_booked = 1 AND rs.current_status NOT IN (2, 11) THEN 1 ELSE 0 END)                       AS paid_days
      , SUM(CASE WHEN rs.is_ever_booked = 1 AND rs.current_status NOT IN (2, 11) THEN 1 ELSE 0 END / rd.paid_days::FLOAT) AS trips
@@ -102,8 +103,8 @@ SELECT s.channels
      , SUM(CASE WHEN COALESCE(rs.trip_end_ts, rs.current_end_ts)::Date <= DATEADD(month, -4, DATE_TRUNC('month', CURRENT_DATE))::Date THEN (rps.partial_contribution_profit - rps.gaap_net_revenue * 0.02)
                 ELSE (rps.gaap_net_revenue * 0.98 - cp.total_cost_per_trip_day * rd.paid_days)
            END / rd.paid_days::FLOAT)                                                                                    AS partial_contribution_profit_usd_no_halo
-     , SUM(CASE WHEN COALESCE(rs.trip_end_ts, rs.current_end_ts)::Date <= DATEADD(month, -4, DATE_TRUNC('month', CURRENT_DATE))::Date THEN (rps.partial_contribution_profit - rps.gaap_net_revenue * 0.02) * s.paid_halo --@jodie: why is default halo 1.25? A: because most channels are 0.25 halo effect.
-                ELSE (rps.gaap_net_revenue * 0.98 - cp.total_cost_per_trip_day * rd.paid_days) * s.paid_halo
+     , SUM(CASE WHEN COALESCE(rs.trip_end_ts, rs.current_end_ts)::Date <= DATEADD(month, -4, DATE_TRUNC('month', CURRENT_DATE))::Date THEN (rps.partial_contribution_profit - rps.gaap_net_revenue * 0.02) * s.paid_halo --@jodie: why is default halo 1.25? A: because most channels are 0.25 halo effect. NOTE: This is entirely arbitrary and should be revisited :).
+                ELSE (rps.gaap_net_revenue * 0.98 - cp.total_cost_per_trip_day * rd.paid_days) * s.paid_halo -- The *0.98 is acceptable on an overall basis, should be updated for user level (e.g. 98% of all net revenue for a month, amortized uniformly across bookings)
            END / rd.paid_days::FLOAT)                                                                                    AS partial_contribution_profit_usd  -- on average, it takes about 3 months for all costs to get realized, so we use estimated cost_per_trip_day to compute the contribution
            -- There are two issues with cp.total_cost_per_trip_day : it is updating everytime (no consistent historical value) + does not account for cost per day fluctuations over time
      , SUM(csr.paid_claims / rd.paid_days::FLOAT)                                                                        AS paid_claims
@@ -139,9 +140,12 @@ FROM finance.reservation_profit_summary_staging rps
          LEFT JOIN marketing_scratch.cost_per_trip_day_by_monaco_demand cp
               ON rd.monaco_bin=cp.monaco_bin
          JOIN analytics.date d
+            -- Is the idea here to include a single day for each date of a trip?
               ON d.date BETWEEN COALESCE(rs.trip_start_ts, rd.current_start_ts)::D AND DATEADD('day', rd.paid_days::INT - 1, COALESCE(rs.trip_start_ts, rs.current_start_ts))::D
 WHERE TRUE
   --AND d.date < DATE_TRUNC('month', CURRENT_DATE)
+        -- Converting to ::Date redundant, low priority
+        -- This should ensure we are only observing trip days that have actually occurred
       AND DATEADD('month', CAST(increments_from_signup - 1 AS int), s.signup_month)::Date < DATEADD('month', -1, DATE_TRUNC('month', CURRENT_DATE))::Date
 GROUP BY 1, 2, 3
 ;
@@ -181,13 +185,14 @@ FROM
          , b.signup_month
          , b.channels
          , b.paid_halo
-         , a.days_since_first_trip_end/28 AS month_since_first_trip
+         -- Where does the first trip end get considered? Is it populated as 0? Want to make sure we're considering that value here
+         , a.days_since_first_trip_end/28 AS month_since_first_trip --Issue in how we're comparing...in theory with the first 2 "months" of 30 days we can scale effectively but still iffy.
          , a.ltr
          , DATE_TRUNC('day',a.prediction_date)::D AS prediction_date
          , RANK() OVER (PARTITION BY a.driver_id ORDER BY DATE_TRUNC('day',a.prediction_date) DESC) AS rank1
     FROM
     (SELECT *
-         FROM marketing.ltr_from_activation_last
+         FROM marketing.ltr_from_activation_last --Confirm with @Jodie that this has been updated
          WHERE run_id IN (SELECT run_id FROM marketing_scratch.ltr_run_id)
           ) a
 
@@ -200,11 +205,12 @@ FROM
     ON DATE_TRUNC('day',a.prediction_date)=c.prediction_date
 
     INNER JOIN #signups b
-    ON a.driver_id=b.driver_id
+    ON a.driver_id=b.driver_id --Only includes predictions for drives who've signed up
 
-    INNER JOIN marketing.ltr_from_activation_historical lha
+    INNER JOIN marketing.ltr_from_activation_historical lha --What is the purpose of this join?
     ON lha.driver_id=a.driver_id AND lha.run_id=a.run_id
     --averaging by signup day, with 30 day offset
+    -- ^^ Signup month?
     WHERE DATEDIFF(day, b.signup_date, date_trunc('day',a.prediction_date))<=60 AND DATEDIFF(day, b.signup_date, DATE_TRUNC('day',a.prediction_date))>=30)
 WHERE rank1=1
 ;
@@ -214,7 +220,7 @@ SELECT channels,
        signup_month,
        month_since_first_trip,
        --avg(ltr*COALESCE(1 + NULLIF(s.paid_halo, 0), 1.25)) AS ltr_per_activation
-       AVG(ltr) AS ltr_per_activation
+       AVG(ltr) AS ltr_per_activation --Why are we not using paid halo?
 INTO #ltr1
 FROM #ltr
 GROUP BY 1,2,3;
@@ -231,6 +237,7 @@ FROM
            , a.pred_day_after_signup/28                                                       AS month_since_signup
            , a.pred_p                                                                         AS activate_prob
            , DATE_TRUNC('day',a.created)::D                                                   AS prediction_date
+           --truncing a.created is redundant/unncessary
            , RANK() OVER (PARTITION BY a.driver_id ORDER BY DATE_TRUNC('day',a.created) DESC) AS rank1
 
     FROM
@@ -294,6 +301,7 @@ FROM (SELECT channels,
       FROM #signups
       GROUP BY 1,2) a
 LEFT JOIN #activation1 b
+--Join to signup_month/channel to get activations based on total signups
 ON a.signup_month=b.signup_month AND a.channels = b.channels;
 
 DROP TABLE IF EXISTS #ds_master;
@@ -306,11 +314,13 @@ SELECT a.channels,
        a.activations,
        b.month_since_first_trip                                                                        AS month_since_activation,
        b.ltr_per_activation,
+       -- month_since_first_trip can be 0, so month_since_first_trip-1 can be -1 (ltr_month can be before activation_month?)
        DATEADD('month',b.month_since_first_trip-1,a.activation_month)                                  AS ltr_month,
        DATEDIFF('month',a.signup_month,DATEADD('month',b.month_since_first_trip-1,a.activation_month)) AS ltr_month_since_singup,
        a.activations*b.ltr_per_activation                                                              AS ltr,
        a.activations*b.ltr_per_activation/a.num_signups                                                AS ltr_per_signup
 INTO #ds_master
+-- The below join results in a cartesian product, producing a row at uniqueness of channel, signup_month, month_since_signup, month_since_first_trip
 FROM #activation3 a
 LEFT JOIN #ltr1 b
 ON a.channels=b.channels
@@ -324,8 +334,10 @@ INTO #ds_final
 FROM
     (SELECT channels,
             signup_month,
+            --Increment 1 is first month
             ltr_month_since_singup+1        AS increments_from_signup,
             ltr_month                       AS trip_month,
+            -- Combine all activations at all time horizons for a given signup month to get the total LTR
             SUM(ltr_per_signup)             AS accumulated_ltr_per_signup
     FROM #ds_master
     WHERE ltr_month_since_singup+1<=24
@@ -334,8 +346,10 @@ JOIN
     (SELECT channels,
             signup_month,
             month_since_signup              AS increments_from_signup,
+            --AVG here seems analogous to select distinct? Why don't we just pull from activations?
             AVG(activations)                AS activations
     FROM #ds_master
+        --Why are we filtering on ltr_month_since_signup and not month_since_signup? seems like the filter below isn't achieving anything
     WHERE ltr_month_since_singup+1<=24
     GROUP BY 1,2,3) b
 ON a.channels = b.channels
@@ -362,6 +376,7 @@ LEFT JOIN
                 rs.reservation_id,
                 d.gaap_net_revenue,
                 e.paid_days,
+                -- Take first trip for a driver
                 ROW_NUMBER() OVER (PARTITION BY rs.driver_id ORDER BY rs.trip_start_ts) AS rank1
          FROM analytics.reservation_summary rs
          INNER JOIN (SELECT DISTINCT driver_id FROM #ltr) b
@@ -445,6 +460,7 @@ INTO #historical_curve_by_signup_month
 FROM pcp_denom
 ;
 
+-- This confuses me, we're taking a single historical curve that's averaged across all months?
 DROP TABLE IF EXISTS #avg_historical_curve;
 SELECT channels
      , increments_from_signup
@@ -464,7 +480,7 @@ DROP TABLE IF EXISTS #demand_paid_days;
 SELECT a.*
      , b.ds_curve
      , c.avg_historical_curve
-     , a.paid_days*1 AS projected_paid_days
+     , a.paid_days*1 AS projected_paid_days -- Why are we multiplying by 1? Value will be null for increments not yet observed
 INTO #demand_paid_days
 FROM #marketing_cohort_metrics a
          LEFT JOIN (SELECT * FROM #ds_curve_by_signup_month
@@ -472,6 +488,7 @@ FROM #marketing_cohort_metrics a
               ON a.channels = b.channels
               AND a.signup_month = b.signup_month
               AND a.increments_from_signup = b.increments_from_signup
+        -- Shouldn't we use the curve specific to a given signup_month-channel? Why would we expect the current curve to conform to the curve in 2016?
          LEFT JOIN #avg_historical_curve c
               ON a.channels = c.channels
               AND a.increments_from_signup=c.increments_from_signup
@@ -488,6 +505,7 @@ select a.signup_month,
        b.signups,
        a.projected_paid_days_per_signup*b.signups as combine
     into #combine_weight_raw
+    -- Why is proj paid days per signup coming from a scratch table?
     from analytics_scratch.nrpd_by_channels a
     join (SELECT signup_month,
                  channels,
@@ -509,6 +527,7 @@ into #demand_nrpd_raw
                         where case when date_part(day,current_date)<=2 
                                    then signup_month=dateadd('month',-1,date_trunc('month',current_date))
                               else signup_month=dateadd('month',0,date_trunc('month',current_date)) end  --no cps target for current month in the first 2 days
+                              -- Will need to clarify this, why are we taking only the latest value? Idea here being that we're going to use the current value for perpetuity going forward? *BE SURE TO CALL OUT*
                ) b
 on a.increments_from_signup=b.increments_from_signup
     and a.channels=b.channels
@@ -519,6 +538,9 @@ where b.increments_from_signup is not null
 DROP TABLE IF EXISTS #demand_nrpd;
 SELECT a.*
      --, a.net_revenue_per_day*1 AS projected_net_revenue_per_day
+     -- If observed, take actual NRPD
+        -- If increment in next 12 months, take increment
+        -- If increment > 12 months, take value for 12th increment
      , CASE WHEN a.net_revenue_per_day>0 THEN a.net_revenue_per_day
        ELSE (CASE WHEN c.increments_from_signup<=12 THEN c.net_revenue_per_paid_day
              ELSE d.net_revenue_per_paid_day END)
@@ -602,7 +624,7 @@ and a.trip_month=b.trip_month
 ------------------#cost_per_trip_day_final-------------------
 drop table if exists #cost_per_trip_day_breakdown;
 select a.channels,
-       a.trip_month as signup_month,
+       a.trip_month as signup_month, --We assume the cost for any signup month is a function of the observed costs for trips taken in that month for ALL users from a given channel. This seems odd and out of step with CPS (e.g. predicting distribution based on past 3 months + adjust for seasonal cost). Confirm undersatnding, no need to solve (we can call out to Andrew)
        a.monaco_bin,
        a.distribution,
        b.total_cost_per_trip_day,
@@ -628,6 +650,7 @@ group by 1, 2;
 --calculate projected pcp
 ------------------------------------------------------------------------------------------------------------------------
 DROP TABLE IF EXISTS #avg_halo;
+-- Should be redundant since we have a single value for each channel
 SELECT channels,
        signup_month,
        AVG(paid_halo) AS avg_paid_halo 
@@ -657,9 +680,9 @@ INTO #demand_master
 FROM #demand_paid_days a
 LEFT JOIN #demand_nrpd d
 ON a.channels = d.channels
-and a.signup_month=d.signup_monthgoog
+and a.signup_month=d.signup_month
 AND a.increments_from_signup=d.increments_from_signup
-LEFT JOIN #avg_halo c
+LEFT JOIN #avg_halo c --Avg halo is a bit odd since this should be same on channel basis
 ON a.channels = c.channels
 and a.signup_month=c.signup_month
 LEFT JOIN #cost_per_trip_day_final e
@@ -667,8 +690,6 @@ ON a.channels = e.channels
 and a.signup_month=e.signup_month
 ;
 
-DROP TABLE IF EXISTS #google_ltv;
 SELECT *
-INTO #google_ltv
 from #demand_master
-where channels in ('Google_Desktop', 'Google_Mobile', 'Google_Dekstop', 'Google_Mobile_Brand');
+where channels in ('Google_Desktop', 'Google_Mobile', 'Google_Desktop_Brand', 'Google_Mobile_Brand');
