@@ -7,6 +7,7 @@ authors = ["Ben Saunders <bsaunders@turo.com>"]
 [tool.poetry.dependencies]
 python = "^3.10"
 python-ml-common = {git = "https://github.com/turo/python-ml-common.git"}
+jinja2 = "^3.1.4"
 
 [tool.poetry.dev-dependencies]
 ipykernel = "^6.26.0"
