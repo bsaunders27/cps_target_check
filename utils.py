@@ -1,5 +1,6 @@
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 def update_paid_days(signup_month_start, channel, signup_value):
     increments_start = 1
@@ -59,8 +60,16 @@ def google_plot(summary_all):
     for ax, channel in zip(axes.flatten(), ['Google_Desktop', 'Google_Mobile', 'Google_Desktop_Brand', 'Google_Mobile_Brand']):
         for metric, color, name in zip(['12_mo_pcp_per_signup', '60_mo_pcp_per_signup', 'realized_pcp_per_signup', 'cps'], ['lightgreen', 'green', 'blue', 'red'], ['12-month PCP', '60-month PCP', 'Actual PCP', 'CPS']):
             ax.plot('signup_month', metric, '--' if metric != 'cps' else '-', label = name, marker = '.', color=color, data = summary_all.loc[summary_all.channels==channel])
+        ax1 = ax.twinx()
+        ax1.bar(data = summary_all.loc[summary_all.channels==channel], 
+                    x='signup_month', height='signups', label = 'Signups', width=20, color='blue', alpha=0.2)
         ax.set_title(channel, fontweight='bold')
         ax.set_ylabel('$/Signup')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
+        ax1.set_ylabel('Signups')
+        ## Combine legends between the two axes into a single legend
+        h1, l1 = ax.get_legend_handles_labels()
+        h2, l2 = ax1.get_legend_handles_labels()
+        ax.legend(h1 + h2, l1 + l2, bbox_to_anchor=(1.1, 1), loc='upper left', borderaxespad=0.)
+
 
     plt.show()
